@@ -158,11 +158,25 @@ function isBlockedIpv6Address(hostname: string): boolean {
   if (!hextets) return true;
   const firstHextet = Number.parseInt(hextets[0], 16);
   if (!Number.isFinite(firstHextet)) return true;
+  // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) carry an IPv4 address that the
+  // translator connects to, so the embedded address must pass the IPv4 policy.
+  const embeddedIpv4 = (hi: string, lo: string): number[] => {
+    const h = Number.parseInt(hi, 16);
+    const l = Number.parseInt(lo, 16);
+    return [(h >> 8) & 0xff, h & 0xff, (l >> 8) & 0xff, l & 0xff];
+  };
+  if (hextets.slice(0, 6).join(':') === '0064:ff9b:0000:0000:0000:0000') {
+    return isBlockedIpv4Address(embeddedIpv4(hextets[6], hextets[7]));
+  }
+  if (firstHextet === 0x2002) {
+    return isBlockedIpv4Address(embeddedIpv4(hextets[1], hextets[2]));
+  }
   // After expansion, loopback (::1) and unspecified (::) have first hextet 0.
   return (
     firstHextet === 0 ||
     (firstHextet & 0xfe00) === 0xfc00 ||
     (firstHextet & 0xffc0) === 0xfe80 ||
+    (firstHextet & 0xffc0) === 0xfec0 ||
     (firstHextet & 0xff00) === 0xff00 ||
     hextets.join(':').startsWith('2001:0db8:')
   );
