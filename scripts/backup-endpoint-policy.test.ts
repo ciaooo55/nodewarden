@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeBackupEndpointUrl } from '../src/services/backup-config';
+import {
+  normalizeBackupEndpointUrl,
+  normalizeBackupSettingsInput,
+  parseBackupSettings,
+} from '../src/services/backup-config';
 
 const blocked = [
   'http://127.0.0.1',
@@ -40,5 +44,45 @@ test('backup endpoint policy rejects internal hosts', () => {
 test('backup endpoint policy keeps public hosts working', () => {
   for (const url of allowed) {
     assert.doesNotThrow(() => normalizeBackupEndpointUrl(url, 'WebDAV server URL'), url);
+  }
+});
+
+const newlyBlocked = ['http://[fec0::1]', 'http://[64:ff9b::a00:1]', 'http://[2002:c0a8:101::1]'];
+const storedSettings = (baseUrl: string) => ({
+  destinations: [
+    {
+      id: 'ok',
+      name: 'ok',
+      type: 'webdav',
+      destination: { baseUrl: 'https://dav.example.com', username: 'u', password: 'p', remotePath: '/' },
+    },
+    {
+      id: 'old',
+      name: 'old',
+      type: 'webdav',
+      destination: { baseUrl, username: 'u', password: 'p', remotePath: '/' },
+    },
+  ],
+});
+
+test('settings saved before the new IPv6 rules still load in full', () => {
+  for (const url of newlyBlocked) {
+    const settings = parseBackupSettings(JSON.stringify(storedSettings(url)));
+    assert.deepEqual(settings.destinations.map((destination) => destination.id), ['ok', 'old'], url);
+  }
+});
+
+test('stored settings with addresses blocked before this change still fall back to defaults', () => {
+  const settings = parseBackupSettings(JSON.stringify(storedSettings('http://127.0.0.1')));
+  assert.notDeepEqual(settings.destinations.map((destination) => destination.id), ['ok', 'old']);
+});
+
+test('saving settings rejects the newly blocked IPv6 addresses', () => {
+  for (const url of newlyBlocked) {
+    assert.throws(
+      () => normalizeBackupSettingsInput(storedSettings(url), { destinations: [] }),
+      /host is not allowed/,
+      url
+    );
   }
 });

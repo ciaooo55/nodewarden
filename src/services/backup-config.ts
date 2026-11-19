@@ -133,7 +133,7 @@ function expandIpv6Address(hostname: string): string[] | null {
   return hextets;
 }
 
-function isBlockedIpv6Address(hostname: string): boolean {
+function isBlockedIpv6Address(hostname: string, storedSettings = false): boolean {
   if (!hostname.includes(':')) return false;
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
 
@@ -165,10 +165,10 @@ function isBlockedIpv6Address(hostname: string): boolean {
     const l = Number.parseInt(lo, 16);
     return [(h >> 8) & 0xff, h & 0xff, (l >> 8) & 0xff, l & 0xff];
   };
-  if (hextets.slice(0, 6).join(':') === '0064:ff9b:0000:0000:0000:0000') {
+  if (!storedSettings && hextets.slice(0, 6).join(':') === '0064:ff9b:0000:0000:0000:0000') {
     return isBlockedIpv4Address(embeddedIpv4(hextets[6], hextets[7]));
   }
-  if (firstHextet === 0x2002) {
+  if (!storedSettings && firstHextet === 0x2002) {
     return isBlockedIpv4Address(embeddedIpv4(hextets[1], hextets[2]));
   }
   // After expansion, loopback (::1) and unspecified (::) have first hextet 0.
@@ -176,13 +176,13 @@ function isBlockedIpv6Address(hostname: string): boolean {
     firstHextet === 0 ||
     (firstHextet & 0xfe00) === 0xfc00 ||
     (firstHextet & 0xffc0) === 0xfe80 ||
-    (firstHextet & 0xffc0) === 0xfec0 ||
+    (!storedSettings && (firstHextet & 0xffc0) === 0xfec0) ||
     (firstHextet & 0xff00) === 0xff00 ||
     hextets.join(':').startsWith('2001:0db8:')
   );
 }
 
-function assertBackupEndpointHostAllowed(hostname: string, label: string): void {
+function assertBackupEndpointHostAllowed(hostname: string, label: string, storedSettings = false): void {
   const normalized = normalizeHostnameForPolicy(hostname);
   if (!normalized) throw new Error(`${label} host is required`);
   if (
@@ -214,12 +214,15 @@ function assertBackupEndpointHostAllowed(hostname: string, label: string): void 
   if (ipv4 && isBlockedIpv4Address(ipv4)) {
     throw new Error(`${label} host is not allowed`);
   }
-  if (isBlockedIpv6Address(normalized)) {
+  if (isBlockedIpv6Address(normalized, storedSettings)) {
     throw new Error(`${label} host is not allowed`);
   }
 }
 
-export function normalizeBackupEndpointUrl(value: string, label: string): string {
+// storedSettings: settings saved before the NAT64/6to4/fec0::/10 rules existed must
+// still load, otherwise one such destination resets every destination to defaults.
+// Saving and uploading always use the full policy.
+export function normalizeBackupEndpointUrl(value: string, label: string, storedSettings = false): string {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -235,7 +238,7 @@ export function normalizeBackupEndpointUrl(value: string, label: string): string
   if (parsed.search || parsed.hash) {
     throw new Error(`${label} must not include query or fragment`);
   }
-  assertBackupEndpointHostAllowed(parsed.hostname, label);
+  assertBackupEndpointHostAllowed(parsed.hostname, label, storedSettings);
   return parsed.toString().replace(/\/+$/, '');
 }
 
@@ -280,7 +283,7 @@ function normalizeStartTime(value: unknown, fallback: string = BACKUP_DEFAULT_ST
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-function normalizeS3Destination(value: unknown, allowIncomplete = false): S3BackupDestination {
+function normalizeS3Destination(value: unknown, allowIncomplete = false, storedSettings = false): S3BackupDestination {
   const source = isPlainObject(value) ? value : {};
   const endpoint = asTrimmedString(source.endpoint);
   const bucket = asTrimmedString(source.bucket);
@@ -294,7 +297,7 @@ function normalizeS3Destination(value: unknown, allowIncomplete = false): S3Back
 
   if (!allowIncomplete || endpoint) {
     if (!endpoint) throw new Error('S3 endpoint is required');
-    normalizeBackupEndpointUrl(endpoint, 'S3 endpoint');
+    normalizeBackupEndpointUrl(endpoint, 'S3 endpoint', storedSettings);
   }
   if (!allowIncomplete || bucket) {
     if (!bucket) throw new Error('S3 bucket is required');
@@ -307,7 +310,7 @@ function normalizeS3Destination(value: unknown, allowIncomplete = false): S3Back
   }
 
   return {
-    endpoint: endpoint ? normalizeBackupEndpointUrl(endpoint, 'S3 endpoint') : '',
+    endpoint: endpoint ? normalizeBackupEndpointUrl(endpoint, 'S3 endpoint', storedSettings) : '',
     bucket,
     addressingStyle,
     region,
@@ -317,7 +320,7 @@ function normalizeS3Destination(value: unknown, allowIncomplete = false): S3Back
   };
 }
 
-function normalizeWebDavDestination(value: unknown, allowIncomplete = false): WebDavBackupDestination {
+function normalizeWebDavDestination(value: unknown, allowIncomplete = false, storedSettings = false): WebDavBackupDestination {
   const source = isPlainObject(value) ? value : {};
   const baseUrl = asTrimmedString(source.baseUrl);
   const username = asTrimmedString(source.username);
@@ -326,7 +329,7 @@ function normalizeWebDavDestination(value: unknown, allowIncomplete = false): We
 
   if (!allowIncomplete || baseUrl) {
     if (!baseUrl) throw new Error('WebDAV server URL is required');
-    normalizeBackupEndpointUrl(baseUrl, 'WebDAV server URL');
+    normalizeBackupEndpointUrl(baseUrl, 'WebDAV server URL', storedSettings);
   }
   if (!allowIncomplete || username) {
     if (!username) throw new Error('WebDAV username is required');
@@ -336,7 +339,7 @@ function normalizeWebDavDestination(value: unknown, allowIncomplete = false): We
   }
 
   return {
-    baseUrl: baseUrl ? normalizeBackupEndpointUrl(baseUrl, 'WebDAV server URL') : '',
+    baseUrl: baseUrl ? normalizeBackupEndpointUrl(baseUrl, 'WebDAV server URL', storedSettings) : '',
     username,
     password,
     remotePath,
@@ -346,10 +349,11 @@ function normalizeWebDavDestination(value: unknown, allowIncomplete = false): We
 function normalizeDestination(
   destinationType: BackupDestinationType,
   destination: unknown,
-  allowIncomplete = false
+  allowIncomplete = false,
+  storedSettings = false
 ): BackupDestinationConfig {
-  if (destinationType === 's3') return normalizeS3Destination(destination, allowIncomplete);
-  return normalizeWebDavDestination(destination, allowIncomplete);
+  if (destinationType === 's3') return normalizeS3Destination(destination, allowIncomplete, storedSettings);
+  return normalizeWebDavDestination(destination, allowIncomplete, storedSettings);
 }
 
 function shouldPreserveBackupSecret(value: unknown): boolean {
@@ -418,7 +422,8 @@ function normalizeDestinationRecord(
   input: unknown,
   previousById: Map<string, BackupDestinationRecord>,
   index: number,
-  fallbackTimezone: string
+  fallbackTimezone: string,
+  storedSettings = false
 ): BackupDestinationRecord {
   if (!isPlainObject(input)) {
     throw new Error('Backup destination is invalid');
@@ -451,7 +456,8 @@ function normalizeDestinationRecord(
   const destination = normalizeDestination(
     type,
     withPreservedDestinationSecret(type, input.destination, previous),
-    !schedule.enabled
+    !schedule.enabled,
+    storedSettings
   );
 
   return {
@@ -484,7 +490,7 @@ function parseLegacyBackupSettings(rawValue: Record<string, unknown>, fallbackTi
     name: defaultDestinationName(destinationType, 1),
     type: destinationType,
     includeAttachments: false,
-    destination: normalizeDestination(destinationType, rawValue.destination),
+    destination: normalizeDestination(destinationType, rawValue.destination, false, true),
     schedule: {
       enabled: !!rawValue.enabled,
       intervalHours,
@@ -503,7 +509,8 @@ function parseLegacyBackupSettings(rawValue: Record<string, unknown>, fallbackTi
 function parseDestinations(
   rawDestinations: unknown,
   previousById: Map<string, BackupDestinationRecord>,
-  fallbackTimezone: string
+  fallbackTimezone: string,
+  storedSettings = false
 ): BackupDestinationRecord[] {
   if (!Array.isArray(rawDestinations)) {
     throw new Error('Backup destinations are invalid');
@@ -512,7 +519,7 @@ function parseDestinations(
     throw new Error(`You can save up to ${MAX_BACKUP_DESTINATIONS} backup destinations`);
   }
 
-  const destinations = rawDestinations.map((entry, index) => normalizeDestinationRecord(entry, previousById, index, fallbackTimezone));
+  const destinations = rawDestinations.map((entry, index) => normalizeDestinationRecord(entry, previousById, index, fallbackTimezone, storedSettings));
   const ids = new Set<string>();
   for (const destination of destinations) {
     if (ids.has(destination.id)) {
@@ -604,7 +611,7 @@ export function parseBackupSettings(raw: string | null, fallbackTimezone: string
         };
       });
       return {
-        destinations: parseDestinations(normalizedEntries, previousById, fallbackTimezone),
+        destinations: parseDestinations(normalizedEntries, previousById, fallbackTimezone, true),
       };
     }
     return parseLegacyBackupSettings(parsed, fallbackTimezone);
